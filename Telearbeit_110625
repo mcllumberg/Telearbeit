@@ -1,0 +1,1043 @@
+*&---------------------------------------------------------------------*
+*& Report  ZHR_ZAEHLTAGE_AUSLAND
+*&
+*&---------------------------------------------------------------------*
+*& " ml12012023 - Anpassung der Jahre, speziell für die erste Jahreshälfte 2023
+*&
+*&---------------------------------------------------------------------*
+*& ÜBERARBEITUNGSHINWEISE:
+*&
+*& Das Programm wurde modularisiert, um eine bessere Struktur und
+*& Wartbarkeit zu erreichen. Folgende Überarbeitungen wurden vorgenommen:
+*&
+*& 1. Strukturierung der Datendefinitionen in logische Gruppen
+*& 2. Auslagerung von Funktionalitäten in FORM-Routinen:
+*&    - initialization: Programminitialisierung
+*&    - prepare_selection_screen: Vorbereitung des Selektionsbildschirms
+*&    - process_employee_data: Hauptverarbeitung pro Mitarbeiter
+*&    - read_absence_data: Lesen der Abwesenheitsdaten
+*&    - get_social_insurance_info: Ermittlung der SV-Informationen
+*&    - read_time_data: Lesen der Zeitdaten
+*&    - handle_reentry: Behandlung von Wiedereintritten
+*&    - calculate_employment_degree: Berechnung des Beschäftigungsgrads
+*&    - read_infotype_data: Lesen der Infotypdaten
+*&    - process_pa2002_entries: Verarbeitung der Abwesenheiten
+*&    - split_absences_to_days: Aufsplitten mehrtägiger Abwesenheiten
+*&    - display_results: Anzeige der Ergebnisse
+*&    - adjust_fieldcatalog: Anpassung des Feldkatalogs
+*&    - aggregate_data: Aggregation der Daten für Summenanzeige
+*&    - create_alv_output: ALV-Ausgabe erstellen
+*&    - handle_user_command: Verarbeitung von Benutzerkommandos
+*&---------------------------------------------------------------------*
+
+report zhr_zaehltage_ausland.
+
+tables: pernr.
+nodes: peras.
+
+infotypes: 0000, 0001, 0002, 0008, 2002, 0007.
+
+*----------------------------------------------------------------------*
+* Typen
+*----------------------------------------------------------------------*
+types: begin of ty_data,
+         pernr type pernr_d,
+         begda type begda,
+         awart type awart,
+         pause type abrst,
+       end of ty_data.
+
+*----------------------------------------------------------------------*
+* Infotyp-Strukturen
+*----------------------------------------------------------------------*
+data: ls_p0000  type p0000,
+      ls_p0001  type p0001,
+      ls_p0002  type p0002,
+      ls_p0008  type p0008,
+      ls_pa2002 type pa2002,
+      ls_pa0007 type pa0007,
+      ls_pa0105 type pa0105,
+      ls_pa0000 type pa0000.
+
+*----------------------------------------------------------------------*
+* Tabellen
+*----------------------------------------------------------------------*
+data: lt_pa2002     type table of pa2002,
+      lt_t554t      type table of t554t,
+      lt_data       type table of zhr_s_telearbeit,
+      lt_data_small type table of zhr_s_telearbeit,
+      lt_fieldcat   type lvc_t_fcat,
+      lt_dates      type table of sy-datum,
+      lt_data_tmp   type table of ty_data.
+
+*----------------------------------------------------------------------*
+* Zeitdaten
+*----------------------------------------------------------------------*
+data: lt_b2      type hrf_tim_b2,
+      ls_zes     type ptr_f_zes,
+      ls_zes_tmp type ptr_f_zes.
+
+*----------------------------------------------------------------------*
+* Strukturen
+*----------------------------------------------------------------------*
+data: ls_data       type zhr_s_telearbeit,
+      ls_data_small type zhr_s_telearbeit,
+      ls_t554t      type t554t,
+      ls_dates      like line of lt_dates,
+      ls_data_tmp   type ty_data.
+
+*----------------------------------------------------------------------*
+* Validitätskennzeichen
+*----------------------------------------------------------------------*
+data: f_p0000 type char1,
+      f_p0001 type char1,
+      f_p0002 type char1,
+      f_p0008 type char1.
+
+*----------------------------------------------------------------------*
+* Hilfsvariablen für Berechnungen
+*----------------------------------------------------------------------*
+data: lv_days            type i,
+      lv_sum             type dbnum,
+      lv_bsgrd           type bsgrd,
+      lv_telearbeit_max  type dbnum,
+      lv_bsgrd_act       type bsgrd,
+      lv_kontingent_days type dbnum,
+      lv_kontingent_std  type dbnum,
+      ok_code            type sy-ucomm,
+      lv_nodata          type c value 'X',
+      l_lines            type int4,
+      l_count            type int4,
+      lv_count           type int4,
+      lv_entry           type begda,
+      lv_leave           type endda,
+      lv_last_exit       type begda.
+
+*----------------------------------------------------------------------*
+* Objektreferenzen
+*----------------------------------------------------------------------*
+data: gr_telearbeit        type ref to zhr_cl_telearbeit,
+      lv_antrag_telearbeit type bool,
+      lv_bw                type abap_bool.
+
+field-symbols: <ls_data_tmp> type zhr_s_telearbeit,
+               <fs_data_tmp> type ty_data.
+
+*----------------------------------------------------------------------*
+* Selektionsparameter
+*----------------------------------------------------------------------*
+select-options: so_steue for ls_pa2002-awart no intervals,
+so_sv for ls_pa2002-awart no intervals.
+
+parameters: p_proz   type dbnum default '20.0',
+            p_soztag type int2 default 50,
+            p_anz_h  type int2  default 40,
+            p_all    type c default ' '.
+
+***********************************************************************
+initialization.
+***********************************************************************
+  perform initialization.
+
+**********************************************************************
+at selection-screen output.
+**********************************************************************
+  perform prepare_selection_screen.
+
+**********************************************************************
+start-of-selection.
+**********************************************************************
+
+**********************************************************************
+get peras.
+**********************************************************************
+* daten für den aktuellen mitarbeiter lesen und verarbeiten
+  perform process_employee_data.
+
+**********************************************************************
+end-of-selection.
+**********************************************************************
+  perform display_results.
+
+*&---------------------------------------------------------------------*
+*& Form initialization
+*&---------------------------------------------------------------------*
+*& Initialisiert das Programm, erzeugt ein Telearbeit-Objekt und
+*& liest die Personalnummer des aktuellen Benutzers
+*&---------------------------------------------------------------------*
+form initialization.
+  clear: lv_bw.
+
+* absprung bw prüfen
+  import c_bw_tele to lv_bw from memory id 'ZHR_BW_TELEARBEIT'.
+
+* telearbeit-objekt erzeugen
+  create object gr_telearbeit.
+
+* personalnummer des aktuellen benutzers ermitteln
+  select single * from pa0105 into ls_pa0105
+  where usrid = sy-uname  and
+  begda <= sy-datum and
+  endda >= sy-datum and
+  subty = '0001'.
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form prepare_selection_screen
+*&---------------------------------------------------------------------*
+*& Bereitet den Selektionsbildschirm vor, setzt die Personalnummer und
+*& ermittelt die Anzahl der Sozialversicherungstage
+*&---------------------------------------------------------------------*
+form prepare_selection_screen.
+  clear: pnppernr.
+
+* vorbelegen der personalnummer für ess-benutzer
+  if syst-slset = 'ESS' or syst-slset = 'ESS23' or syst-slset = 'ESS24' or syst-slset = 'ESS25'.
+    refresh pnppernr.
+    pnppernr-sign = 'I'.
+    pnppernr-option = 'EQ'.
+    pnppernr-low = ls_pa0105-pernr.
+    append pnppernr to pnppernr.
+  endif.
+
+* für ess24/ess25: sv-tage ermitteln
+  if syst-slset = 'ESS24' or syst-slset = 'ESS25'.
+    clear: p_soztag.
+
+* anzahl tage aus telearbeit-klasse ermitteln
+    gr_telearbeit->get_sv_info(
+    exporting
+      iv_pernr   = ls_pa0105-pernr
+    importing
+      ex_sv_tage = p_soztag
+      ).
+  endif.
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form process_employee_data
+*&---------------------------------------------------------------------*
+*& Verarbeitet die Daten für den aktuellen Mitarbeiter
+*&---------------------------------------------------------------------*
+form process_employee_data.
+* infotyp 2002 und abwesenheitsartbeschreibungen lesen
+  perform read_absence_data.
+
+* sv-informationen ermitteln (wenn nötig)
+  if pn-begda >= '20240101'.
+    perform get_social_insurance_info.
+  endif.
+
+* zeitdaten lesen
+  perform read_time_data.
+
+* eintritts- und austrittsdatum ermitteln
+  zcl_hr_pa_assist=>get_hr_entry_date(
+  exporting
+    im_pernr      = peras-pernr
+  importing
+    ex_entry_date = lv_entry
+    ).
+
+* wiedereintritt behandeln
+  perform handle_reentry.
+
+  zcl_hr_pa_assist=>get_hr_leaving_date(
+  exporting
+    im_pernr        = peras-pernr
+  importing
+    ex_leaving_date = lv_leave
+    ).
+
+* beschäftigungsgrad berechnen
+  perform calculate_employment_degree.
+
+* infotypdaten lesen und verarbeiten
+  perform read_infotype_data.
+
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form read_absence_data
+*&---------------------------------------------------------------------*
+*& Liest Abwesenheitsdaten (Infotyp 2002) und die zugehörigen Abwesenheitsarten
+*&---------------------------------------------------------------------*
+form read_absence_data.
+* infotyp 2002 (abwesenheiten) lesen
+  select * from pa2002 into table lt_pa2002
+  where pernr = peras-pernr and
+  begda between pn-begda and pn-endda and
+  endda between pn-begda and pn-endda and
+  ( subty in so_steue or
+  subty in so_sv ).
+
+* beschreibungen der ab- und anwesenheitsarten lesen
+  select * from t554t into table lt_t554t
+  where sprsl = 'D' and
+  awart in so_steue.
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form get_social_insurance_info
+*&---------------------------------------------------------------------*
+*& Ermittelt die Sozialversicherungsinformationen für den Mitarbeiter
+*&---------------------------------------------------------------------*
+form get_social_insurance_info.
+  clear: p_soztag.
+
+* anzahl tage und telearbeit-antrag ermitteln
+  gr_telearbeit->get_sv_info(
+  exporting
+    iv_pernr   = peras-pernr
+  importing
+    ex_sv_tage = p_soztag
+    ex_antrag_telearbeit = lv_antrag_telearbeit
+    ).
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form read_time_data
+*&---------------------------------------------------------------------*
+*& Liest die Zeitdaten des Mitarbeiters
+*&---------------------------------------------------------------------*
+form read_time_data.
+  call function 'HR_FORMS_TIM_GET_B2_RESULTS'
+    exporting
+      pernr                 = peras-pernr
+      begda                 = pn-begda
+      endda                 = pn-endda
+    importing
+      tim_b2                = lt_b2
+    exceptions
+      wrong_cluster_version = 1
+      no_read_authority     = 2
+      cluster_archived      = 3
+      technical_error       = 4
+      others                = 5.
+
+  if sy-subrc = 0.
+* nur relevante zeitarten behalten
+    delete lt_b2-ft_zes
+    where ztart ne '0002' and
+    ztart ne '0500'.
+
+    sort lt_b2-ft_zes by datum ztart.
+  endif.
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form handle_reentry
+*&---------------------------------------------------------------------*
+*& Behandelt den Fall eines Wiedereintritts (für korrekte Datumsbegrenzung)
+*&---------------------------------------------------------------------*
+form handle_reentry.
+* prüfen, ob es sich um einen wiedereintritt handelt
+  select single * from pa0000 into ls_pa0000
+  where pernr = peras-pernr and
+  ( begda between pn-begda and pn-endda ) and
+  stat2 = '3' and
+  massn = '11'.     " Wiedereintritt
+
+  if ls_pa0000-massn = '11'. " Wiedereintritt
+* letzten austrittstermin ermitteln
+    select max( begda ) from pa0000 into lv_last_exit
+    where pernr = peras-pernr and
+    massn = '10' and " Austritt
+    begda < pn-endda.
+
+    lv_last_exit = lv_last_exit - 1.
+
+    if lv_last_exit(4) = pn-begda(4).  " Austritt im gleichen Jahr
+* behalte pn-begda unverändert
+    else.
+      if lv_entry > pn-begda.
+        pn-begda = lv_entry.
+      endif.
+    endif.
+  else.
+    if lv_entry > pn-begda.
+      pn-begda = lv_entry.
+    endif.
+  endif.
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form calculate_employment_degree
+*&---------------------------------------------------------------------*
+*& Berechnet den durchschnittlichen Beschäftigungsgrad und die Kontingente
+*&---------------------------------------------------------------------*
+form calculate_employment_degree.
+  clear: lv_days, lv_sum.
+
+  data: ls_pa0008 type pa0008.
+
+* beschäftigungsgradinformationen (it 0008) lesen
+  select * from pa0008 into ls_pa0008
+  where pernr = peras-pernr and
+  begda le pn-endda and
+  endda ge pn-begda.
+
+* zeitraum auf den betrachteten zeitraum begrenzen
+    if ls_pa0008-begda < pn-begda.
+      ls_pa0008-begda = pn-begda.
+    endif.
+
+* bei austritt das enddatum anpassen
+    if lv_leave <> '99991231'.
+      if ls_pa0008-endda > lv_leave.
+        ls_pa0008-endda = lv_leave.
+      endif.
+    endif.
+
+* enddatum auf den betrachteten zeitraum begrenzen
+    if ls_pa0008-endda > pn-endda.
+      ls_pa0008-endda = pn-endda.
+    endif.
+
+* tage und gewichteten beschäftigungsgrad kumulieren
+    lv_days = ( lv_days + ( ls_pa0008-endda - ls_pa0008-begda ) ) + 1.
+    lv_sum = lv_sum + ( ( (  ls_pa0008-endda - ls_pa0008-begda ) + 1 ) * ( ls_pa0008-bsgrd / 100 ) ).
+
+  endselect.
+
+* durchschnittlichen beschäftigungsgrad berechnen
+  lv_bsgrd = lv_sum / lv_days.
+
+* maximale telearbeit pro woche berechnen
+  lv_telearbeit_max = lv_bsgrd * p_anz_h * ( p_proz / 100 ).
+
+* kontingent in tagen und stunden berechnen
+  lv_kontingent_days = p_soztag * lv_bsgrd * ( lv_days / ( ( pn-endda - pn-begda ) + 1 ) ).
+  lv_kontingent_std = lv_kontingent_days * 8.
+
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form read_infotype_data
+*&---------------------------------------------------------------------*
+*& Liest die benötigten Infotypdaten für den Mitarbeiter
+*&---------------------------------------------------------------------*
+form read_infotype_data.
+* infotypdaten über die logische datenbank pnpce lesen
+  provide fields * from p0000 into ls_p0000 valid f_p0000
+  bounds begda and endda
+  where pernr eq peras-pernr and
+  begda le pn-endda and
+  endda ge pn-begda and
+  stat2 = '3'
+  fields * from p0001 into ls_p0001 valid f_p0001
+  bounds begda and endda
+  where pernr eq peras-pernr and
+  begda le pn-endda and
+  endda ge pn-begda
+  fields * from p0002 into ls_p0002 valid f_p0002
+  bounds begda and endda
+  where pernr eq peras-pernr and
+  begda le pn-endda and
+  endda ge pn-begda
+  fields * from p0008 into ls_p0008 valid f_p0008
+  bounds begda and endda
+  where pernr eq peras-pernr and
+  begda le pn-endda and
+  endda ge pn-begda
+  between pn-begda and pn-endda.
+
+    clear: ls_data.
+
+* stammdaten in die ergebnisstruktur übertragen
+    ls_data-pernr = peras-pernr.
+    ls_data-vorna = ls_p0002-vorna.
+    ls_data-nachn = ls_p0002-nachn.
+    ls_data-bsgrd = ls_p0008-bsgrd.
+    ls_data-kostl = ls_p0001-kostl.
+    ls_data-durchschnittl_bsgrd = lv_bsgrd * 100.
+    ls_data-telearbeit_durchschnitt_woche = lv_telearbeit_max.
+    ls_data-kontingent_std = lv_kontingent_std.
+    ls_data-kontingent_days = lv_kontingent_days.
+
+* kontingent-rest nur beim ersten satz setzen, sonst wert beibehalten
+    if sy-index = 1.
+      ls_data-kontingent_rest = lv_kontingent_std.
+    else.
+      ls_data-kontingent_rest = ls_data-kontingent_rest.
+    endif.
+
+* wenn noch keine daten, dann initialen datensatz hinzufügen
+    if lv_nodata = 'X'.
+      append ls_data to lt_data.
+    endif.
+
+* aktuellen beschäftigungsgrad ermitteln
+    if ls_p0008-begda le sy-datum and
+    ls_p0008-endda ge sy-datum.
+      lv_bsgrd_act = ls_p0008-bsgrd.
+    endif.
+
+* zeitraum anpassen
+    if ls_p0008-begda < pn-begda.
+      ls_p0008-begda = pn-begda.
+    endif.
+
+    if ls_p0008-endda > pn-endda.
+      ls_p0008-endda = pn-endda.
+    endif.
+
+* pa2002-einträge verarbeiten
+    perform process_pa2002_entries changing ls_data lt_data_tmp.
+  endprovide.
+
+  delete adjacent duplicates from lt_data_tmp comparing pernr begda.
+
+  loop at lt_data_tmp assigning <fs_data_tmp> where pernr = ls_data-pernr.
+    at new begda.
+      read table lt_b2-ft_zes into ls_zes
+      with key datum = <fs_data_tmp>-begda
+      ztart = '0500'.
+
+      <fs_data_tmp>-pause = ls_zes-anzhl.
+      clear: ls_zes.
+    endat.
+  endloop.
+
+  data: lv_kont_tmp  type zhr_s_telearbeit-kontingent_rest,
+        lv_begda_tmp type begda.
+
+*  LOOP AT lt_data_tmp ASSIGNING <fs_data_tmp>.
+  loop at lt_data assigning <ls_data_tmp> where pernr = ls_data-pernr.
+    if lv_begda_tmp <> <ls_data_tmp>-begda.
+
+* kontingent-rest nur beim ersten satz setzen, sonst wert beibehalten
+      if sy-tabix = 1.
+        read table lt_data_tmp assigning <fs_data_tmp> with key begda = <fs_data_tmp>-begda awart = <fs_data_tmp>-awart.
+        if <ls_data_tmp>-ist_h <= '0.5'.
+          <ls_data_tmp>-ist_h = <ls_data_tmp>-ist_h.
+        else.
+          <ls_data_tmp>-ist_h = <ls_data_tmp>-ist_h - <fs_data_tmp>-pause.
+        endif.
+        <ls_data_tmp>-kontingent_rest = <ls_data_tmp>-kontingent_std - <ls_data_tmp>-ist_h.
+        lv_kont_tmp = <ls_data_tmp>-kontingent_rest.
+      else.
+        read table lt_data_tmp assigning <fs_data_tmp> with key begda = <fs_data_tmp>-begda awart = <fs_data_tmp>-awart.
+        if <ls_data_tmp>-ist_h <= '0.5'.
+          <ls_data_tmp>-ist_h = <ls_data_tmp>-ist_h.
+        else.
+          <ls_data_tmp>-ist_h = <ls_data_tmp>-ist_h - <fs_data_tmp>-pause.
+        endif.
+        <ls_data_tmp>-kontingent_rest = lv_kont_tmp - <ls_data_tmp>-ist_h.
+        lv_kont_tmp = <ls_data_tmp>-kontingent_rest.
+      endif.
+    else. " für den Fall, dass merhere Datensätze je Tag auftreten, nur einmal Pause abziehen und die Kontingente nachziehen
+      <ls_data_tmp>-kontingent_rest = lv_kont_tmp - <ls_data_tmp>-ist_h.
+      lv_kont_tmp = <ls_data_tmp>-kontingent_rest.
+    endif.
+    lv_begda_tmp = <ls_data_tmp>-begda.
+  endloop.
+
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form process_pa2002_entries
+*&---------------------------------------------------------------------*
+*& Verarbeitet die PA2002-Einträge (Abwesenheiten) des Mitarbeiters
+*&---------------------------------------------------------------------*
+form process_pa2002_entries changing ls_data type zhr_s_telearbeit
+  lt_data_tmp like lt_data_tmp.
+  data: lt_pa2002_tmp type table of pa2002,
+        lv_half_hour  type char1,
+        lv_kont_tmp   type zhr_s_telearbeit-kontingent_rest.
+
+
+* tabelle sortieren für korrekte gruppenstufenverarbeitung
+  sort lt_pa2002 by pernr begda awart ascending.
+
+* tagesweise aufsplittung von mehrtägigen abwesenheiten
+  perform split_absences_to_days changing lt_pa2002.
+
+* tabelle sortieren für korrekte gruppenstufenverarbeitung
+  sort lt_pa2002 by pernr begda awart ascending.
+
+* initialisierungen
+*  CLEAR ls_data.
+
+* einzelne abwesenheitstage verarbeiten - ohne where-bedingung
+  loop at lt_pa2002 into ls_pa2002 where begda ge ls_p0008-begda and endda le ls_p0008-endda.
+
+* wenn nodata-flag gesetzt, den leeren eintrag entfernen
+    if lv_nodata = 'X'.
+      describe table lt_data lines l_lines.
+      delete lt_data from l_lines.
+      lv_nodata = ''.
+    endif.
+
+* sollzeit ermitteln
+    read table lt_b2-ft_zes into ls_zes
+    with key datum = ls_pa2002-begda
+    ztart = '0002'.
+
+    ls_data-soll = ls_zes-ztart.
+    ls_data-soll_h = ls_zes-anzhl.
+    ls_data-datum_soll = ls_pa2002-begda.
+    clear: ls_zes.
+
+
+* ist-stunden übernehmen
+    ls_data-ist = ls_pa2002-subty.
+    ls_data-ist_h = ls_data-ist_h + ls_pa2002-stdaz.
+    ls_data-datum_ist = ls_pa2002-begda.
+
+* abwesenheitsart übernehmen
+    ls_data-awart = ls_pa2002-awart.
+
+* beschreibung der abwesenheitsart ermitteln
+    read table lt_t554t into ls_t554t with key awart = ls_data-awart.
+    ls_data-descr = ls_t554t-atext.
+    clear: ls_t554t.
+
+    ls_data-begda = ls_pa2002-begda.
+    ls_data-endda = ls_pa2002-endda.
+
+* bei wechsel des datums aggregationen durchführen
+    at end of begda.
+
+* summierung
+      sum.
+
+* abrechnungsquote berechnen
+      if ls_data-soll_h <> 0.
+        ls_data-abrtg = ls_data-ist_h / ls_data-soll_h.
+* spezialfall: weniger als 0,5 stunden ab 2024
+        if ls_data-ist_h <= '0.5' and ls_data-begda >= '20240101'.
+          ls_data-abrtg = 0.
+          ls_data-zaehltag = 0.
+          lv_half_hour = 'X'.
+        endif.
+      else.
+* wenn keine sollstunden, aber iststunden vorhanden
+        if ls_data-ist_h <> 0.
+          ls_data-abrtg = 1.
+* spezialfall: weniger als 0,5 stunden ab 2024
+          if ls_data-ist_h <= '0.5' and ls_data-begda >= '20240101'.
+            ls_data-abrtg = 0.
+            ls_data-zaehltag = 0.
+            lv_half_hour = 'X'.
+          endif.
+        endif.
+      endif.
+
+* abrechnungsstunden = ist-stunden
+      ls_data-abrst = ls_data-ist_h.
+*    ENDAT.
+
+* Zähltag auf Basis des Abrechnungsverhältnisses setzen
+      ls_data-zaehltag = ls_data-abrtg.
+      if ls_data-zaehltag <> 1 and lv_half_hour <> 'X'.
+        ls_data-zaehltag = 1.
+      endif.
+      clear: lv_half_hour.
+
+* Mehrfacheinträge pro Tag behandeln
+      loop at lt_data assigning <ls_data_tmp> where pernr = ls_data-pernr and
+      begda = ls_data-begda.
+* Berechnung erstmal rückgängig machen
+        ls_data-kontingent_rest = ls_data-kontingent_rest + ls_data-abrst.
+        <ls_data_tmp>-kontingent_rest = <ls_data_tmp>-kontingent_rest + <ls_data_tmp>-abrst.
+
+* Bei doppelten Einträgen die Ist-Stunden durch Abrechnungsstunden ersetzen
+        <ls_data_tmp>-ist_h = <ls_data_tmp>-abrst.
+        ls_data-ist_h = ls_data-abrst.
+
+* Kontingent anpassen
+        <ls_data_tmp>-kontingent_rest = <ls_data_tmp>-kontingent_rest - <ls_data_tmp>-abrst.
+        ls_data-kontingent_rest = <ls_data_tmp>-kontingent_rest.
+
+* Zähltag und Abrechnungsstunden zurücksetzen
+        clear: <ls_data_tmp>-zaehltag, <ls_data_tmp>-abrst.
+      endloop.
+
+* Kontingent für Sozialversicherung reduzieren, falls relevant
+      if ls_data-awart in so_sv.
+* Für 2023 spezielle Logik
+        if syst-slset = 'ESS23' or syst-slset = '/BW_TELE' or syst-slset = '/BW_TELE_ALL'.
+          if ls_data-begda >= '20230701'.
+            ls_data-kontingent_rest = ls_data-kontingent_rest - ls_data-abrst.
+          endif.
+        else.
+* Für alle anderen Jahre
+          ls_data-kontingent_rest = ls_data-kontingent_rest - ls_data-abrst.
+        endif.
+      endif.
+
+* Telearbeit-Antrag-Informationen setzen
+      ls_data-antrag_telearbeit = lv_antrag_telearbeit.
+      ls_data-antrag_telearbeit_auspr = p_soztag.
+
+* Ergebnisdatensatz hinzufügen
+      append ls_data to lt_data.
+      move-corresponding ls_data to ls_data_tmp.
+      clear ls_data_tmp-pause.
+      append ls_data_tmp to lt_data_tmp.
+
+      clear: ls_data-ist_h, ls_data-abrst, ls_data_tmp.
+    endat.
+    at end of pernr.
+      lv_nodata = 'X'.
+    endat.
+  endloop.
+
+* Letzten Kontingent-Rest speichern und Duplikate entfernen
+  lv_kont_tmp = ls_data-kontingent_rest.
+*  CLEAR ls_data.                                                     " Del ml06062025
+  delete adjacent duplicates from lt_data comparing all fields.
+  ls_data-kontingent_rest = lv_kont_tmp.
+
+*  DELETE ADJACENT DUPLICATES FROM lt_data_tmp COMPARING pernr begda.
+*
+*  LOOP AT lt_data_tmp ASSIGNING <fs_data_tmp>.
+*    AT NEW begda.
+*      READ TABLE lt_b2-ft_zes INTO ls_zes
+*        WITH KEY datum = <fs_data_tmp>-begda
+*        ztart = '0500'.
+*
+*      <fs_data_tmp>-pause = ls_zes-anzhl.
+*      CLEAR: ls_zes.
+*    ENDAT.
+*  ENDLOOP.
+
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form split_absences_to_days
+*&---------------------------------------------------------------------*
+*& Splitted mehrtägige Abwesenheiten in einzelne Tage auf
+*&---------------------------------------------------------------------*
+form split_absences_to_days changing pt_pa2002 type standard table.
+  data: lt_pa2002_tmp type table of pa2002,
+        l_count       type int4.
+
+* jede abwesenheit verarbeiten
+  loop at pt_pa2002 into ls_pa2002.
+* mehrtägige abwesenheit?
+    if ls_pa2002-begda ne ls_pa2002-endda.
+* tage zwischen 2 daten berechnen
+      zcl_hr_helper=>get_days_between_dates(
+      exporting
+        im_begda = ls_pa2002-begda
+        im_endda = ls_pa2002-endda
+      importing
+        et_dates = lt_dates
+        ).
+
+      if lt_dates is not initial.
+        describe table lt_dates lines l_count.
+      endif.
+    else.
+      l_count = 1.
+    endif.
+
+* für jeden tag einen separaten eintrag erzeugen
+    do l_count times.
+      clear: ls_dates.
+      read table lt_dates into ls_dates index sy-index.
+      if sy-subrc = 0.
+        ls_pa2002-begda = ls_dates.
+        ls_pa2002-endda = ls_dates.
+        if sy-tabix = 1.
+          ls_pa2002-abrst = ls_pa2002-abrst / ls_pa2002-abrtg.
+          ls_pa2002-stdaz = ls_pa2002-abrst.
+        endif.
+      endif.
+      append ls_pa2002 to lt_pa2002_tmp.
+    enddo.
+    clear: lt_dates.
+  endloop.
+
+* originaltabelle mit der tagesweise aufgesplitteten ersetzen
+  clear: pt_pa2002.
+  pt_pa2002 = lt_pa2002_tmp.
+  clear: lt_pa2002_tmp.
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form display_results
+*&---------------------------------------------------------------------*
+*& Zeigt die Ergebnisse in der ALV an
+*&---------------------------------------------------------------------*
+form display_results.
+  field-symbols: <fs_fields> type line of lvc_t_fcat.
+  data: ls_fieldcat  type lvc_s_fcat.
+
+  if p_all = 'X'.
+* feldkatalog aufbauen
+    lt_fieldcat = zcl_hr_helper=>create_fieldcat_lvc( lt_data ).
+
+* feldkatalog anpassen
+    perform adjust_fieldcatalog.
+
+    if lv_bw = abap_false.
+      call screen 9000.
+    endif.
+  else. " nur Summen zeigen
+* daten aggregieren
+    perform aggregate_data.
+
+* feldkatalog aufbauen
+    lt_fieldcat = zcl_hr_helper=>create_fieldcat_lvc( lt_data_small ).
+
+* feldkatalog anpassen
+    perform adjust_fieldcatalog.
+
+    if lv_bw = abap_false.
+      call screen 9001.
+    endif.
+  endif.
+
+* für bw-absprung daten exportieren
+  if lv_bw = abap_true.
+    if lt_data_small is not initial.
+      export gt_data from lt_data_small to memory id 'ZBWTELEARBEIT'.
+    else.
+      export gt_data from lt_data to memory id 'ZBWTELEARBEIT'.
+    endif.
+    free memory id 'ZHR_BW_TELEARBEIT'.
+  endif.
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form adjust_fieldcatalog
+*&---------------------------------------------------------------------*
+*& Passt die Feldbezeichnungen im Feldkatalog an
+*&---------------------------------------------------------------------*
+form adjust_fieldcatalog.
+  field-symbols: <fs_fields> type line of lvc_t_fcat.
+  data: ls_fieldcat  type lvc_s_fcat.
+
+  loop at lt_fieldcat assigning <fs_fields>.
+    ls_fieldcat-fieldname  = <fs_fields>-fieldname.  "Feldname
+    ls_fieldcat-tabname    = <fs_fields>-tabname.    "LVC-Tabname
+    ls_fieldcat-scrtext_l  = <fs_fields>-scrtext_l.  "Feldbezeichner L
+    ls_fieldcat-scrtext_m  = <fs_fields>-scrtext_m.  "Feldbezeichner M
+    ls_fieldcat-scrtext_s  = <fs_fields>-scrtext_s.  "Feldbezeichner S
+    ls_fieldcat-ref_field  = <fs_fields>-ref_field.  "Referenzfeld
+    ls_fieldcat-ref_table  = <fs_fields>-ref_table.  "Referenztabelle
+
+    case ls_fieldcat-fieldname.
+      when 'KONTINGENT_DAYS'.
+        ls_fieldcat-scrtext_l  = 'SV Kontingent je Jahr IN Tagen'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  = 'SV Kont. Jahr Tage'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'SV Kont. J. Tage'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Sozialversicherungskontingent je Jahr IN Tagen'.
+      when 'KONTINGENT_STD'.
+        ls_fieldcat-scrtext_l  = 'SV Kontingent Jahr Stunden'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  =' SV Kont. Jahr Std'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'SV Kont. J. Std'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Sozialversicherungskontingent gesamt p. Jahr IN Stunden'.
+      when 'KONTINGENT_REST'.
+        ls_fieldcat-scrtext_l  = 'SV Rest Jahr Stunden'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  = 'SV Rest Jahr Std'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'SV Rest J. Std'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Sozialversicherungskontingent bis 31.12.'.
+      when 'IST_H'.
+        ls_fieldcat-scrtext_l  = 'Ist Stunden'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  = 'Ist Stunden'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'Ist Stunden'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Zählstunden Sozialversicherung'.
+      when 'TELEARBEIT_DURCHSCHNITT_WOCHE'.
+        ls_fieldcat-scrtext_l  = 'durchschnittliche Telearbeit je Woche'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  = 'durchschn. Telearb. Woche'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'durch.Telearb.Woche'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Durchschnitt der möglichen Telearbeit pro Woche'.
+      when 'DURCHSCHNITTL_BSGRD'.
+        ls_fieldcat-scrtext_l  = 'durchschnittlicher Beschäftigungsgrad'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  = 'durchschn. Beschäftigungsgrad'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'durchschn. Begrd.'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Beschäftigungsgrad im Durchschnitt'.
+      when 'ZAEHLTAG'.
+        ls_fieldcat-scrtext_l  = 'Zähltage Steuer'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  = 'Zähltage Steuer'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'Zähltage Steuer.'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Zähltage für die Steuer'.
+      when 'BASIS_ARBEITSTAGE'.
+        ls_fieldcat-scrtext_l  = 'Basis Arbeitstage BSGRD'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  = 'Basis Arbt.BSGRD'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'Basis Arbt.BSGRD'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Arbeitstage Beschäftigungsgrad'.
+      when 'ANTEIL_TELEARBEIT_STEUER'.
+        ls_fieldcat-scrtext_l  = 'Anteil Telearbeit Steuerliche Tage'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  =' Anteil Steuerliche Tage'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'Anteil Steuerliche Tage'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Anteil Telearbeit Steuerliche Tage'.
+      when 'ANTEIL_SOZIALVERSICHERUNG_STEU'.
+        ls_fieldcat-scrtext_l  = 'Anteil Telearbeit Sozialversicherung Tage'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  = 'Anteil SV Tage'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'Anteil SV Tage'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Anteil Telearbeit Sozialversicherung Tage'.
+      when 'ANTRAG_TELEARBEIT'.
+        ls_fieldcat-scrtext_l  = 'Antrag zur Telearbeit gestellt'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  = 'Antrag Telearbeit'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'Antrag Telearbeit'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Antrag zur Telearbeit gestellt'.
+      when 'ANTRAG_TELEARBEIT_AUSPR'.
+        ls_fieldcat-scrtext_l  = 'Ausprägung Telearbeit'.  "Feldbezeichner L
+        ls_fieldcat-scrtext_m  = 'Ausprägung Telearbeit'.  "Feldbezeichner M
+        ls_fieldcat-scrtext_s  = 'Ausprägung Telearbeit'.  "Feldbezeichner S
+        ls_fieldcat-tooltip    = 'Ausprägung Telearbeit'.
+    endcase.
+
+    modify lt_fieldcat from ls_fieldcat.
+    clear ls_fieldcat.
+  endloop.
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form aggregate_data
+*&---------------------------------------------------------------------*
+*& Aggregiert die Daten für die Summenanzeige
+*&---------------------------------------------------------------------*
+form aggregate_data.
+  clear: ls_data.
+  sort lt_data ascending by pernr begda awart.
+
+* daten aggregieren
+  loop at lt_data into ls_data.
+* stammdaten übernehmen
+    ls_data_small-pernr = ls_data-pernr.
+    ls_data_small-vorna = ls_data-vorna.
+    ls_data_small-nachn = ls_data-nachn.
+    ls_data_small-bsgrd = ls_data-bsgrd.
+    ls_data_small-kostl = ls_data-kostl.
+    ls_data_small-durchschnittl_bsgrd = ls_data-durchschnittl_bsgrd.
+    ls_data_small-telearbeit_durchschnitt_woche = ls_data-telearbeit_durchschnitt_woche.
+    ls_data_small-kontingent_std = ls_data-kontingent_std.
+    ls_data_small-kontingent_days = ls_data-kontingent_days.
+    ls_data_small-kontingent_rest = ls_data-kontingent_rest.
+
+* werte aufsummieren
+    ls_data_small-abrtg = ls_data_small-abrtg + ls_data-abrtg.
+    ls_data_small-zaehltag = ls_data_small-zaehltag + ls_data-zaehltag.
+    ls_data_small-abrst = ls_data_small-abrst + ls_data-abrst.
+    ls_data_small-soll_h = ls_data_small-soll_h + ls_data-soll_h.
+    ls_data_small-ist_h = ls_data_small-ist_h + ls_data-ist_h.
+
+* berechnungen
+    ls_data_small-basis_arbeitstage = ( 220 * ls_data-durchschnittl_bsgrd ) / 100.
+    if ls_data_small-basis_arbeitstage <> 0.
+      ls_data_small-anteil_telearbeit_steuer = ls_data_small-zaehltag / ls_data_small-basis_arbeitstage * 100.
+    endif.
+    if ls_data_small-kontingent_std <> 0.
+      ls_data_small-anteil_sozialversicherung_steu = 1 - ( ls_data_small-kontingent_rest / ls_data_small-kontingent_std ).
+    endif.
+    ls_data_small-antrag_telearbeit = ls_data-antrag_telearbeit.
+    ls_data_small-antrag_telearbeit_auspr = ls_data-antrag_telearbeit_auspr.
+
+* bei wechsel der personalnummer aggregierten satz ausgeben
+    at end of pernr.
+      append ls_data_small to lt_data_small.
+      clear: ls_data_small.
+    endat.
+
+    clear: ls_data.
+  endloop.
+endform.
+
+*&---------------------------------------------------------------------*
+*&      Module  STATUS_9000  OUTPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+module status_9000 output.
+  set pf-status 'ZHR_MOBIL'.
+  set titlebar '9000'.
+
+  if p_all = 'X'.
+    perform create_alv_output using lt_data '/DEFAULT'.
+  else.
+    perform create_alv_output using lt_data_small '/ESS'.
+  endif.
+
+endmodule.
+
+*&---------------------------------------------------------------------*
+*&      Module  USER_COMMAND_9000  INPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+module user_command_9000 input.
+  perform handle_user_command.
+endmodule.
+
+*&---------------------------------------------------------------------*
+*& Form create_alv_output
+*&---------------------------------------------------------------------*
+*& Erstellt die ALV-Ausgabe
+*&---------------------------------------------------------------------*
+form create_alv_output using pt_data type any table
+      pv_variant type disvariant-variant.
+  data: ls_variant   type disvariant,
+        gr_alv       type ref to cl_gui_alv_grid,
+        gr_container type ref to cl_gui_custom_container.
+
+  if gr_container is initial.
+* hintergrundverarbeitung prüfen
+    if cl_gui_alv_grid=>offline( ) is initial.
+      create object gr_container
+        exporting
+          container_name = 'ALV'.
+      if sy-subrc <> 0.
+* fehlerbehandlung
+      endif.
+
+      create object gr_alv
+        exporting
+          i_parent = gr_container.
+      if sy-subrc <> 0.
+* fehlerbehandlung
+      endif.
+    else.
+* hintergrundverarbeitung
+      create object gr_alv
+        exporting
+          i_parent = gr_container.
+      if sy-subrc <> 0.
+* fehlerbehandlung
+      endif.
+    endif.
+
+* alv-konfiguration
+    ls_variant-report   = sy-repid.
+    ls_variant-username = sy-uname.
+    ls_variant-variant  = pv_variant.
+
+* alv-anzeige
+    gr_alv->set_table_for_first_display(
+    exporting
+      is_variant      = ls_variant
+      i_save          = 'X'
+      i_default       = 'X'
+    changing
+      it_outtab       = pt_data
+      it_fieldcatalog = lt_fieldcat
+    exceptions
+      others          = 4
+      ).
+    if sy-subrc <> 0.
+* fehlerbehandlung
+    endif.
+  endif.
+endform.
+
+*&---------------------------------------------------------------------*
+*& Form handle_user_command
+*&---------------------------------------------------------------------*
+*& Verarbeitet Benutzerkommandos im Dynpro
+*&---------------------------------------------------------------------*
+form handle_user_command.
+  if sy-ucomm = 'EXIT'.
+    leave to screen 0.
+  endif.
+  if ok_code = 'CHANGE'.
+    leave to screen 9001.
+  endif.
+  if ok_code = 'CHANGE_ALL'.
+    leave to screen 9000.
+  endif.
+endform.
