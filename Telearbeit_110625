@@ -462,9 +462,12 @@ form read_infotype_data.
       ls_data-kontingent_rest = ls_data-kontingent_rest.
     endif.
 
-* wenn noch keine daten, dann initialen datensatz hinzufügen
+* wenn noch keine daten, dann initialen datensatz je Mitarbeiter nur einmal hinzufügen
     if lv_nodata = 'X'.
-      append ls_data to lt_data.
+      read table lt_data with key pernr = ls_data-pernr transporting no fields.
+      if sy-subrc <> 0.
+        append ls_data to lt_data.
+      endif.
     endif.
 
 * aktuellen beschäftigungsgrad ermitteln
